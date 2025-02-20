@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Literal, SupportsFloat, cast
+from typing import Any, Literal, Sequence, SupportsFloat, cast
+
+from jetpytools import clamp
 
 from vsaa import Nnedi3
 from vsexprtools import expr_func, norm_expr
@@ -24,20 +26,37 @@ __all__ = [
     'mpeg2stinx'
 ]
 
+StrengthT = SupportsFloat | vs.VideoNode | None
+
 
 class _dpir(CustomStrEnum):
     DEBLOCK: _dpir = 'deblock'  # type: ignore
     DENOISE: _dpir = 'denoise'  # type: ignore
 
     def __call__(
-        self, clip: vs.VideoNode, strength: SupportsFloat | vs.VideoNode | None | tuple[
-            SupportsFloat | vs.VideoNode | None, SupportsFloat | vs.VideoNode | None
-        ] = 10, matrix: MatrixT | None = None, cuda: bool | Literal['trt'] | None = None, i444: bool = False,
+        self, clip: vs.VideoNode, strength: StrengthT | tuple[StrengthT, StrengthT] = 10,
+        matrix: MatrixT | None = None, cuda: bool | Literal['trt'] | None = None, i444: bool = False,
         tiles: int | tuple[int, int] | None = None, overlap: int | tuple[int, int] | None = 8,
-        zones: list[tuple[FrameRangeN | FrameRangesN | None, SupportsFloat | vs.VideoNode | None]] | None = None,
+        zones: Sequence[tuple[FrameRangeN | FrameRangesN | None, StrengthT]] | None = None,
         fp16: bool | None = None, num_streams: int | None = None, device_id: int = 0, kernel: KernelT = Catrom,
         **kwargs: Any
     ) -> vs.VideoNode:
+        """
+        Deep Plug-and-Play Image Restoration
+        :param clip:            Clip to process.
+        :param strength:        Threshold (8-bit scale) strength for deblocking/denoising.
+        :param matrix:          Matrix output.
+        :param cuda:            vs-mlrt backend. Will attempt to auto-select the most suitable one if None.
+        :param i444:            Output as 444 if True.
+        :param tiles:           Splits up the frame into multiple tiles.
+                                Helps if you're lacking in vram but models may behave differently.
+        :param overlap:         
+        :param zones:           Apply different strength in specified zones.
+        :param fp16:            Process in half-precision floating-point format.
+        :param num_streams:     Number of asynchrononous operations. If None, auto pick the best number based on your GPU.
+        :param device_id:       Device ordinal of the GPU.
+        :param kernel:          Kernel used for upsampling/downscampling.
+        """
         func = 'dpir'
 
         try:
@@ -109,7 +128,7 @@ class _dpir(CustomStrEnum):
             return str_clip
 
         if isinstance(strength, vs.VideoNode):
-            strength = _norm_str_clip(strength)  # type: ignore
+            strength = _norm_str_clip(strength)
         elif isinstance(strength, SupportsFloat):
             strength = float(strength)
         else:
@@ -159,11 +178,7 @@ class _dpir(CustomStrEnum):
             overlap_w=overlap_w, overlap_h=overlap_h
         )
 
-        strength_clip = cast(
-            vs.VideoNode, strength if isinstance(
-                strength, vs.VideoNode
-            ) else _get_strength_clip(clip_rgb, strength)  # type: ignore
-        )
+        strength_clip = strength if isinstance(strength, vs.VideoNode) else _get_strength_clip(clip_rgb, strength)
 
         no_dpir_zones = list[FrameRangeN]()
 
@@ -186,9 +201,9 @@ class _dpir(CustomStrEnum):
                 rstr_clip: vs.VideoNode
 
                 if isinstance(zstr, vs.VideoNode):
-                    rstr_clip = _norm_str_clip(zstr)  # type: ignore
+                    rstr_clip = _norm_str_clip(zstr)
                 else:
-                    zstr = float(zstr)  # type: ignore
+                    zstr = float(zstr)
 
                     if zstr not in cache_strength_clips:
                         cache_strength_clips[zstr] = _get_strength_clip(clip_rgb, zstr)
@@ -237,7 +252,7 @@ class _dpir(CustomStrEnum):
             try:
                 data: KwargsT = core.trt.DeviceProperties(device_id)  # type: ignore
                 memory = data.get('total_global_memory', 0)
-                def_num_streams = num_streams or data.get('async_engine_count', 1)
+                def_num_streams = num_streams or clamp(data.get('async_engine_count', 1), 1, 2)
 
                 bkwargs = KwargsT(
                     workspace=memory / (1 << 22) if memory else None,
